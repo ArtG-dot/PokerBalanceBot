@@ -3,15 +3,14 @@ from telebot import types
 import datetime
 from db import init_db
 from logic import create_new_game, close_game, get_active_game, get_game_date, get_last_game, get_game_stat, validate_game_balance, \
-    get_all_players, get_active_players, get_potential_players, get_player_name, check_player_active, get_players_stat, \
+    get_all_players, get_active_players, get_potential_players, get_player, get_players_stat, \
     create_player, add_player, exit_player, add_buyin, update_exit_chips, \
-    calculate_payments, record_payment, apply_payment
+    calculate_payments, execute_payment
 from config import TOKEN, CURRENCY
 
 # === Инициализация ===
 bot = telebot.TeleBot(TOKEN)
 init_db()
-
 
 # ReplyKeyboard кнопка "Главное меню"
 def main_reply_keyboard():
@@ -59,11 +58,10 @@ def show_add_player_menu(chat_id, message_id=None):
     if not players:
         bot.send_message(chat_id, "⚠️ Нет доступных игроков для добавления.")
         return
-    # Собираем клавиатуру
     keyboard = types.InlineKeyboardMarkup()
     row = []
     for i, p in enumerate(players, start=1):
-        row.append(types.InlineKeyboardButton(p[1], callback_data=f"add_{p[0]}"))
+        row.append(types.InlineKeyboardButton(p['name'], callback_data=f"add_player_{p['id']}"))
         if i % 3 == 0:   # каждые 3 кнопки — новая строка
             keyboard.row(*row)
             row = []
@@ -87,14 +85,14 @@ def show_actions_menu(chat_id):
         return
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     for p in players:
-        buyin_btn = types.InlineKeyboardButton(f"{p[1]} — Бай-ин 💰", callback_data=f"buyin_{p[0]}")
-        exit_btn = types.InlineKeyboardButton(f"{p[1]} — Выход 🏁", callback_data=f"exit_{p[0]}")
+        buyin_btn = types.InlineKeyboardButton(f"{p['name']} — Бай-ин 💰", callback_data=f"buyin_{p['id']}")
+        exit_btn = types.InlineKeyboardButton(f"{p['name']} — Выход 🏁", callback_data=f"exit_{p['id']}")
         keyboard.add(buyin_btn, exit_btn)
     keyboard.add(types.InlineKeyboardButton("⤺ Назад", callback_data="game_menu"))
     bot.send_message(chat_id, "Выберите действие для игрока:", reply_markup=keyboard)
 
 
-# ===== Динамическое меню для коррекции кол-ва фишек =====
+# ===== Динамическое меню для коррекции кол-ва фишек при выходе =====
 def show_fix_exit_menu(chat_id, game_id, total_in, total_out, stats):
     keyboard = types.InlineKeyboardMarkup()
     for p in stats:
@@ -120,14 +118,40 @@ def show_players_years_menu(chat_id):
     bot.send_message(chat_id, "Выберите год:", reply_markup=keyboard)
 
 
+# ===== Динамическое меню обработки платежей =====
+def show_payments_menu(chat_id):
+    players = get_all_players()
+    balances = [p for p in players if p['balance'] != 0]
+    if not balances:
+        text = "💸 Все балансы равны 0 ✅\n"
+    else:
+        text = "💸 Балансы игроков:\n\n"
+        text += f"{'Игрок':<12} {'Баланс':>6}\n"
+        text += "─" * 20 + "\n"
+        for p in balances:
+            emoji = "🟢" if p['balance'] > 0 else "🔴"
+            text += f"{p['name']:<12} {p['balance']:>6} {emoji}\n"
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("🖐 Ручной расчёт", callback_data="payments_manual"),
+        types.InlineKeyboardButton("🤖 Авто-расчёт", callback_data="payments_auto"))
+    keyboard.add(types.InlineKeyboardButton("⤺ Назад", callback_data="main_menu"))
+    bot.send_message(chat_id, f"```\n{text}\n```", parse_mode="Markdown")
+    bot.send_message(chat_id, "Выберите действие:", reply_markup=keyboard)
+
+
 
 ### ===== ОБРАБОТКА КНОПОК ===== ###
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     chat_id = call.message.chat.id
 
+    # Показать главное меню
+    if call.data == "main_menu":
+        bot.send_message(chat_id, "Главное меню:", reply_markup=show_start_menu())
+    
     # Старт новой игры
-    if call.data == "start_new_game":
+    elif call.data == "start_new_game":
         game_id = get_active_game()
         if not game_id:
             create_new_game()
@@ -135,8 +159,50 @@ def handle_query(call):
         else:
             bot.send_message(chat_id, "⚠️ Уже есть активная игра.", reply_markup=show_game_menu())
 
+    # Показать игровое меню
+    elif call.data == "game_menu":
+        bot.send_message(chat_id, "Основное меню игры:", reply_markup=show_game_menu())
+
+    # Показать меню добавления игрока в игру
+    elif call.data == "add_player":
+        show_add_player_menu(chat_id, call.message.message_id)
+
+    # Показать меню действий для игрока: бай-ин или выход
+    elif call.data == "add_action":
+        show_actions_menu(chat_id)
+    
+    # Добавление конкретного игрока в игру
+    elif call.data.startswith("add_player_"):
+        player_id = call.data.split("_")[2]
+        player = get_player(player_id)
+        if player["is_playing"] != 1:
+            add_player(get_active_game(), player_id)
+            bot.send_message(chat_id, f"✅ Игрок {player['name']} добавлен в игру.")
+            # После добавления — обновляем список доступных игроков
+            show_add_player_menu(call.message.chat.id, call.message.message_id)
+        else:
+            bot.send_message(chat_id, f"️⚠️ Игрок {player['name']} уже участвует в игре.")
+
+    # Бай-ин конкретного игрока
+    elif call.data.startswith("buyin_"):
+        player_id = call.data.split("_")[1]
+        add_buyin(get_active_game(), player_id)
+        bot.send_message(chat_id, f"💰 Бай-ин учтён для игрока {get_player(player_id)['name']}.")
+    
+    # Выход конкретного игрока
+    elif call.data.startswith("exit_"):
+        player_id = call.data.split("_")[1]
+        msg = bot.send_message(chat_id, f"Введите число фишек, которые выиграл игрок {get_player(player_id)['name']}:")
+        bot.register_next_step_handler(msg, process_exit, player_id)
+    
+    # Исправление числа фишек при выходе
+    elif call.data.startswith("fix_exit_"):
+        player_id = call.data.split("_")[2]
+        msg = bot.send_message(chat_id, f"Введите исправленное число фишек для игрока {get_player(player_id)['name']}:")
+        bot.register_next_step_handler(msg, process_fix_exit, player_id)
+
     # Завершение текущей игры
-    if call.data == "close_game":
+    elif call.data == "close_game":
         game_id = get_active_game()
         if not game_id:
             bot.send_message(chat_id, "⚠️ Нет активной игры.", reply_markup=show_start_menu())
@@ -158,6 +224,29 @@ def handle_query(call):
         msg = bot.send_message(chat_id, "Введите имя нового игрока:")
         bot.register_next_step_handler(msg, create_new_player)
 
+
+
+    # Статистика текущей или последней игры
+    elif call.data == "game_stat":
+        game_id = get_active_game()
+        if not game_id:
+            bot.send_message(chat_id, "⚠️ Нет активной игры. Статистика последней игры:")
+            game_id = get_last_game()
+        game_date = get_game_date(game_id)
+        players = get_game_stat(game_id)
+        if not players:
+            bot.send_message(chat_id, "⚠️ Список игроков пуст.")
+            return
+        total_bank = 0    
+        text = f"🃏📊 Статистика игры от {game_date}:\n\n"
+        text += f"{'Игрок':<10} {'🛒':>2} {'Баланс 🔘':>12} {'Баланс 💵':>14}\n"
+        text += "─" * 39 + "\n"  # разделитель
+        for p in players:
+            text += f"{p['name']:<10} {p['buyins']:>2} {p['chips_in']:>8} / {p['chips_out']:>4} {p['money_in']:>8} / {p['money_out']:>4}\n"
+            total_bank += p['money_in']
+        text += "\n" + "Общий банк: " + str(total_bank) + " " + CURRENCY  
+        bot.send_message(chat_id, f"```\n{text}\n```", parse_mode="Markdown")
+
     # Вывод статистики игроков -> выбор года
     elif call.data == "players_stat":
         show_players_years_menu(chat_id)
@@ -177,116 +266,82 @@ def handle_query(call):
             text += f"{p['name']:<10} {p['games_count']:>4} {p['spent']:>8} {p['earned']:>8} {p['balance']:>8}\n"
         bot.send_message(chat_id, f"```\n{text}\n```", parse_mode="Markdown")
     
-    # Статистика текущей или последней игры
-    elif call.data == "game_stat":
-        game_id = get_active_game()
-        if not game_id:
-            bot.send_message(chat_id, "⚠️ Нет активной игры. Статистика последней игры")
-            game_id = get_last_game()
-        game_date = get_game_date(game_id)
-        players = get_game_stat(game_id)
-        if not players:
-            bot.send_message(chat_id, "⚠️ Список игроков пуст.")
-            return
-        text = f"🃏📊 Статистика игры от {game_date}:\n\n"
-        text += f"{'Игрок':<10} {'🛒':>2} {'Баланс 🔘':>12} {'Баланс 💵':>14}\n"
-        text += "─" * 39 + "\n"  # разделитель
-        for p in players:
-            text += f"{p['name']:<10} {p['buyins']:>2} {p['chips_in']:>8} / {p['chips_out']:>4} {p['money_in']:>8} / {p['money_out']:>4}\n"
-        bot.send_message(chat_id, f"```\n{text}\n```", parse_mode="Markdown")
 
-    # Показать главное меню
-    elif call.data == "main_menu":
-        bot.send_message(chat_id, "Главное меню:", reply_markup=show_start_menu())
-
-    # Показать игровое меню
-    elif call.data == "game_menu":
-        bot.send_message(chat_id, "Основное меню игры:", reply_markup=show_game_menu())
-
-    # Показать меню добавления игрока в игру
-    elif call.data == "add_player":
-        show_add_player_menu(chat_id, call.message.message_id)
-
-    # Показать меню действий для игрока: бай-ин или выход
-    elif call.data == "add_action":
-        show_actions_menu(chat_id)
-
-    # Добавление конкретного игрока в игру
-    elif call.data.startswith("add_"):
-        player_id = call.data.split("_")[1]
-        print(player_id)
-        if not check_player_active(player_id):
-            add_player(get_active_game(), player_id)
-            bot.send_message(chat_id, f"✅ Игрок {get_player_name(player_id)} добавлен в игру")
-            # После добавления — обновляем список доступных игроков
-            show_add_player_menu(call.message.chat.id, call.message.message_id)
-        else:
-            bot.send_message(chat_id, f"️⚠️ Игрок {get_player_name(player_id)} уже участвует в игре")
-
-    # Бай-ин конкретного игрока
-    elif call.data.startswith("buyin_"):
-        player_id = call.data.split("_")[1]
-        add_buyin(get_active_game(), player_id)
-        bot.send_message(chat_id, f"💰 Бай-ин учтён для игрока {get_player_name(player_id)}")
-        #bot.answer_callback_query(call.id, f"💰 Бай-ин учтён для игрока {get_player_name(player_id)}")
-
-    # Выход конкретного игрока
-    elif call.data.startswith("exit_"):
-        player_id = call.data.split("_")[1]
-        msg = bot.send_message(chat_id, f"Введите число фишек, которые выиграл игрок {get_player_name(player_id)}")
-        bot.register_next_step_handler(msg, process_exit, player_id)
-
-    # Исправление числа фишек при выходе
-    elif call.data.startswith("fix_exit_"):
-        player_id = call.data.split("_")[2]
-        msg = bot.send_message(chat_id, f"Введите исправленное число фишек для игрока {get_player_name(player_id)}:")
-        bot.register_next_step_handler(msg, process_fix_exit, player_id)
     
     # Показать меню платежей
-    elif call.data.startswith("payments"):
+    elif call.data == "payments":
+        show_payments_menu(chat_id)
+
+    # Выбор отправителя для ручного платежа
+    elif call.data == "payments_manual":
+        players = get_all_players()
+        debtors = [p for p in players if p['balance'] < 0]
+        if not debtors:
+            bot.send_message(chat_id, "✅ Должников нет")
+            return
+        keyboard = types.InlineKeyboardMarkup()
+        for p in debtors:
+            keyboard.add(types.InlineKeyboardButton(f"{p['name']} ({abs(p['balance'])})", callback_data=f"payment_from_{p['id']}"))
+        keyboard.add(types.InlineKeyboardButton("⤺ Назад", callback_data="payments"))
+        bot.send_message(chat_id, "Выберите должника:", reply_markup=keyboard)
+
+    # Выбор получателя для ручного платежа
+    elif call.data.startswith("payment_from_"):
+        debtor_id = call.data.split("_")[2]
+        players = get_all_players()
+        creditors = [p for p in players if p['balance'] != 0] #можно доработать логику: выводить только игроков из последней игры
+        if not creditors:
+            bot.send_message(chat_id, "✅ Кредиторов нет.")
+            return
+        keyboard = types.InlineKeyboardMarkup()
+        for p in creditors:
+            keyboard.add(types.InlineKeyboardButton(f"{p['name']} ({p['balance']})", callback_data=f"payment_to_{p['id']}_from_{debtor_id}"))
+        keyboard.add(types.InlineKeyboardButton("⤺ Назад", callback_data="payments_manual"))
+        bot.send_message(chat_id, "Выберите кому платить:", reply_markup=keyboard)
+
+    # Определение суммы ручного платежа
+    elif call.data.startswith("payment_to_"):
+        debtor_id = int(call.data.split("_")[4])
+        creditor_id = int(call.data.split("_")[2])
+        debtor = get_player(debtor_id)
+        creditor = get_player(creditor_id)
+        if -debtor['balance'] <= creditor['balance']: #дебитор переводит кредитору весь свой долг
+            amount = -debtor['balance']
+            execute_payment(debtor_id, creditor_id, amount)
+            bot.send_message(chat_id, f"✅ {debtor['name']} перевел {creditor['name']}: {amount} {CURRENCY}")
+            show_payments_menu(chat_id)
+        else: #если дебитор должен больше, чем кредитор имеет, то нужно выбрать сумму перевода
+            keyboard = types.InlineKeyboardMarkup(row_width=2)
+            keyboard.add(types.InlineKeyboardButton(f"{-debtor['balance']} {CURRENCY}", callback_data=f"execute_payment_{debtor['id']}_{creditor['id']}_{-debtor['balance']}"),
+                         types.InlineKeyboardButton(f"{creditor['balance']} {CURRENCY}", callback_data=f"execute_payment_{debtor['id']}_{creditor['id']}_{creditor['balance']}"))
+            keyboard.add(types.InlineKeyboardButton("✏️ Ввести вручную", callback_data=f"execute_payment_{debtor['id']}_{creditor['id']}_{debtor['balance']}"),
+                         types.InlineKeyboardButton("⤺ Назад", callback_data="payments_manual"))
+            bot.send_message(chat_id, f"Выберите сумму перевода от {debtor['name']} к {creditor['name']}:", reply_markup=keyboard)
+
+    # Автоматический расчёт платежей
+    elif call.data == "payments_auto":
         payments = calculate_payments()
         if not payments:
             bot.send_message(chat_id, "✅ Все расчёты закрыты, долгов нет.")
             return
-
         text = "💸 Расчёт долгов:\n\n"
         keyboard = types.InlineKeyboardMarkup()
         for p in payments:
-            text += f"{p['from_name']} → {p['to_name']}: {p['amount']} {CURRENCY}\n"
-            keyboard.add(
-                types.InlineKeyboardButton(
-                    f"{p['from_name']} → {p['to_name']} {p['amount']} {CURRENCY}",
-                    callback_data=
-                    f"pay_{p['from_id']}_{p['to_id']}_{p['amount']}"))
+            keyboard.add(types.InlineKeyboardButton(f"{p['from_name']} → {p['to_name']} {p['amount']} {CURRENCY}",
+                    callback_data=f"execute_payment_{p['from_id']}_{p['to_id']}_{p['amount']}"))
         bot.send_message(chat_id, text, reply_markup=keyboard)
-
-    # Оплата долга между игроками
-    elif call.data.startswith("pay_"):
-        _, from_id, to_id, amount = call.data.split("_")
+    
+    # Проведение платежа (от кого, кому, сумма)
+    elif call.data.startswith("execute_payment_"):
+        _,_, from_id, to_id, amount = call.data.split("_")
         from_id, to_id, amount = int(from_id), int(to_id), int(amount)
-
-        # Зафиксировать платёж
-        record_payment(from_id, to_id, amount)
-        apply_payment(from_id, to_id, amount)
-
-        # Обновить список долгов
-        payments = calculate_payments()
-        keyboard = types.InlineKeyboardMarkup(row_width=1)
-        for p in payments:
-            keyboard.add(
-                types.InlineKeyboardButton(
-                    f"{p['from_name']} → {p['to_name']} {p['amount']} {CURRENCY}",
-                    callback_data=
-                    f"pay_{p['from_id']}_{p['to_id']}_{p['amount']}"))
-        if not payments:
-            bot.edit_message_text("🎉 Все долги закрыты!",
-                                  chat_id=chat_id,
-                                  message_id=call.message.message_id)
+        if amount > 0:
+            execute_payment(from_id, to_id, amount)
+            bot.send_message(chat_id, f"✅ {get_player(from_id)['name']} перевел {get_player(to_id)['name']}: {amount} {CURRENCY}")
+            show_payments_menu(chat_id)
         else:
-            bot.edit_message_text("💸 Обновлённый расчёт долгов:",
-                                  chat_id=chat_id,
-                                  message_id=call.message.message_id,
-                                  reply_markup=keyboard)
+            msg = bot.send_message(chat_id, f"Введите сумму перевода от {get_player(from_id)['name']} к {get_player(to_id)['name']}:")
+            bot.register_next_step_handler(msg, process_manual_payment, from_id, to_id, -amount)	
 
 
 
@@ -296,30 +351,36 @@ def create_new_player(message):
     if not name:
         bot.send_message(message.chat.id, "⚠️ Имя не может быть пустым.")
         return
-    # Проверяем, существует ли игрок
-    existing_players = [p[1].lower() for p in get_all_players()]
-    if name.lower() in existing_players:
+    existing_players = [p['name'].lower() for p in get_all_players()]
+    if name.lower() in existing_players: # Проверяем, существует ли игрок с таким именем
         bot.send_message(message.chat.id, f"⚠️ Игрок с именем {name} уже существует.", reply_markup=show_start_menu())
         return
-    # Создаем нового игрока
     create_player(name)
-    bot.send_message(message.chat.id, f"✅ Игрок {name} успешно добавлен!", reply_markup=show_start_menu())
+    bot.send_message(message.chat.id, f"✅ Игрок {name} успешно добавлен!")
 
 
 def process_exit(message, player_id):
     try:
         chips = int(message.text)
-        exit_player(get_active_game(), player_id, chips)
-        bot.send_message(message.chat.id, f"🏁 Игрок {get_player_name(player_id)} закончил игру с {chips} фишками")
-        show_actions_menu(message.chat.id)
     except ValueError:
-        bot.send_message(message.chat.id, "⚠️ Введите корректное число фишек.")
+        bot.send_message(message.chat.id, "⚠️ Введите корректное число фишек:")
+        return bot.register_next_step_handler(message, process_exit, player_id)
+    if chips < 0:
+        bot.send_message(message.chat.id, "⚠️ Число фишек не может быть отрицательным. Введите корректное число фишек:")
+        return bot.register_next_step_handler(message, process_exit, player_id)
+    exit_player(get_active_game(), player_id, chips)
+    bot.send_message(message.chat.id, f"🏁 Игрок {get_player(player_id)['name']} закончил игру с {chips} фишками.")
+    show_actions_menu(message.chat.id)
+
 
 def process_fix_exit(message, player_id):
     try:
         chips = int(message.text)
     except ValueError:
-        bot.send_message(message.chat.id, "⚠️ Введите корректное число.")
+        bot.send_message(message.chat.id, "⚠️ Введите корректное число фишек:")
+        return bot.register_next_step_handler(message, process_fix_exit, player_id)
+    if chips < 0:
+        bot.send_message(message.chat.id, "⚠️ Число фишек не может быть отрицательным. Введите корректное число фишек:")
         return bot.register_next_step_handler(message, process_fix_exit, player_id)
     game_id = get_active_game()
     update_exit_chips(game_id, player_id, chips)
@@ -330,7 +391,21 @@ def process_fix_exit(message, player_id):
     else:
         show_fix_exit_menu(message.chat.id, game_id, total_in, total_out, stats)
 
-    
+def process_manual_payment(message, debtor_id, creditor_id, max_transfer):
+    try:
+        amount = int(message.text)
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "⚠️ Введите корректное число:")
+        return bot.register_next_step_handler(msg, process_manual_payment, debtor_id, creditor_id, max_transfer)
+    if amount <= 0 or amount > max_transfer:
+        msg = bot.send_message(message.chat.id, f"⚠️ Неверная сумма. Введите число от 1 до {max_transfer}")
+        return bot.register_next_step_handler(msg, process_manual_payment, debtor_id, creditor_id, max_transfer)
+    execute_payment(debtor_id, creditor_id, amount)
+    bot.send_message(message.chat.id, f"✅ {get_player(debtor_id)['name']} перевел {get_player(creditor_id)['name']}: {amount} {CURRENCY}")
+    show_payments_menu(message.chat.id)
+
+
+
 # === ЗАПУСК БОТА===
 if __name__ == "__main__":
     print("✅ Бот запущен...")
