@@ -1,6 +1,5 @@
 from os import error
-import sqlite3
-from config import DB_NAME, BUYIN_VALUE, CHIPS_PER_BUYIN, CHIPS_PER_CURRENCY, CURRENCY
+from config import BUYIN_VALUE, CHIPS_PER_BUYIN, CHIPS_PER_CURRENCY
 from datetime import datetime
 from db import connect
 
@@ -10,34 +9,60 @@ def create_player(name):
     with connect() as conn:
         conn.execute("INSERT INTO players (name) VALUES (?)", (name,))
 
+def get_player(player_id):
+    with connect() as conn:
+        rows = conn.execute("SELECT id, name, spent, earned, balance, is_playing FROM players WHERE id=?", (player_id,)).fetchone()
+    if not rows: 
+        return None
+    return {
+        "id": rows[0],
+        "name": rows[1],
+        "spent": rows[2],
+        "earned": rows[3],
+        "balance": rows[4],
+        "is_playing": rows[5]}
+
 def get_all_players():
     with connect() as conn:
-        return conn.execute("SELECT id, name, spent, earned, balance FROM players ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, name, spent, earned, balance, is_playing FROM players WHERE id != 99999 ORDER BY id").fetchall()
+    if not rows: 
+        return None
+    players = []
+    for r in rows:
+        players.append({
+            "id": r[0],
+            "name": r[1],
+            "spent": r[2],
+            "earned": r[3],
+            "balance": r[4],
+            "is_playing": rows[5]})
+    return players
 
 def get_active_players():
     with connect() as conn:
-        return conn.execute("SELECT id, name FROM players WHERE is_playing=1 ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, name FROM players WHERE is_playing=1 ORDER BY id").fetchall()
+    if not rows: 
+        return None
+    players = []
+    for r in rows:
+        players.append({
+            "id": r[0],
+            "name": r[1]})
+    return players
 
 def get_potential_players():
     with connect() as conn: #sorting by count of games
-        return conn.execute("""SELECT p.id, p.name FROM players p LEFT JOIN activities a ON p.id = a.player_id
-            WHERE is_playing=0 AND a.action='add' GROUP BY p.id, p.name ORDER BY COUNT(a.id) DESC, p.id""").fetchall()
+        rows = conn.execute("""SELECT p.id, p.name FROM players p LEFT JOIN activities a ON p.id = a.player_id
+            WHERE p.is_playing=0 AND p.id != 99999 GROUP BY p.id, p.name ORDER BY COUNT(a.id) DESC, p.id""").fetchall()
+    if not rows: 
+        return None
+    players = []
+    for r in rows:
+        players.append({
+            "id": r[0],
+            "name": r[1]})
+    return players
         
-def get_game_players(game_id):
-    with connect() as conn:
-        return conn.execute("SELECT id, name, is_playing FROM players WHERE last_game_id=? ORDER BY id", (game_id,)).fetchall()
-
-def get_player_name(player_id):
-    with connect() as conn:
-        name = conn.execute("SELECT name FROM players WHERE id=?", (player_id,)).fetchone()
-        return name[0] if name else None
-
-def check_player_active(player_id):
-    with connect() as conn:
-        is_playing = conn.execute("SELECT is_playing FROM players WHERE id=?", (player_id,)).fetchone()
-        return is_playing[0] if is_playing else None
-
-
 
 ## Логика работы с играми
 def create_new_game():
@@ -70,11 +95,6 @@ def validate_game_balance(game_id):
     total_out = sum(p["chips_out"] for p in stats)
     return total_in, total_out, stats
 
-def update_exit_chips(game_id, player_id, new_amount):
-    with connect() as conn:
-        conn.execute("UPDATE activities SET chips_amount=? WHERE game_id=? AND player_id=? AND action='exit'", (new_amount, game_id, player_id))
-        conn.commit()
-
 
 #Логика работы со статистикой
 def get_players_stat(year=None):
@@ -92,7 +112,7 @@ def get_players_stat(year=None):
         if year:
             query += " AND strftime('%Y', g.start_time)=?"
             params.append(str(year))
-        query += " GROUP BY p.id, p.name ORDER BY p.id"
+        query += " GROUP BY p.id, p.name ORDER BY balance DESC, p.id"
         rows = conn.execute(query, params).fetchall()
     stats = []
     for r in rows:
@@ -144,29 +164,41 @@ def add_player(game_id, player_id):
     add_buyin(game_id, player_id)
 
 def add_buyin(game_id, player_id):
-    with sqlite3.connect(DB_NAME) as conn:
+    with connect() as conn:
         conn.execute("INSERT INTO activities (game_id, player_id, action, chips_amount) VALUES (?, ?, ?, ?)", (game_id, player_id, "buyin", CHIPS_PER_BUYIN))
         conn.execute("UPDATE players SET spent=spent+?, balance=balance-? WHERE id=?", (BUYIN_VALUE, BUYIN_VALUE, player_id))
         conn.commit()
 
 def exit_player(game_id, player_id, chips):
-    with sqlite3.connect(DB_NAME) as conn:
+    with connect() as conn:
         conn.execute("INSERT INTO activities (game_id, player_id, action, chips_amount) VALUES (?, ?, ?, ?)", (game_id, player_id, "exit", chips))
         conn.execute("UPDATE players SET is_playing=0, earned=earned+?/?, balance=balance+?/?  WHERE id=?", (chips, CHIPS_PER_CURRENCY, chips, CHIPS_PER_CURRENCY, player_id))
         conn.commit()
 
+def update_exit_chips(game_id, player_id, new_chips):
+    with connect() as conn:
+        cur = conn.cursor()
+        row = cur.execute("SELECT chips_amount FROM activities WHERE game_id=? AND player_id=? AND action='exit'", (game_id, player_id)).fetchone()
+        if not row:
+            return False
+        old_chips = row[0]
+        old_money = old_chips // CHIPS_PER_CURRENCY
+        cur.execute("UPDATE players SET earned = earned - ?, balance = balance - ? WHERE id=?", (old_money, old_money, player_id))
+        cur.execute("UPDATE activities SET chips_amount=? WHERE game_id=? AND player_id=? AND action='exit'", (new_chips, game_id, player_id))
+        new_money = new_chips // CHIPS_PER_CURRENCY
+        cur.execute("UPDATE players SET earned = earned + ?, balance = balance + ? WHERE id=?", (new_money, new_money, player_id))
+        conn.commit()
+        return True
 
 
 #Логика работы с платежами
 def calculate_payments():
     players = get_all_players()
-
     # Составляем словарь балансов: id → (name, balance)
-    balances = {p[0]: {"name": p[1], "balance": p[4]} for p in players}
+    balances = {p['id']: {"name": p['name'], "balance": p['balance']} for p in players}
     # Списки должников и кредиторов
     debtors = [(pid, info["name"], -info["balance"]) for pid, info in balances.items() if info["balance"] < 0]
     creditors = [(pid, info["name"], info["balance"]) for pid, info in balances.items() if info["balance"] > 0]
-
     # Сортируем по величине долга/кредита (крупные сначала)
     debtors.sort(key=lambda x: x[2], reverse=True)
     creditors.sort(key=lambda x: x[2], reverse=True)
@@ -206,16 +238,12 @@ def calculate_payments():
 
     return payments
 
-def record_payment(from_id, to_id, amount, user="system"):
+def execute_payment(from_id, to_id, amount, user="system"):
     with connect() as conn:
         conn.execute("""
             INSERT INTO payments (timestamp, from_player_id, to_player_id, money_amount, user)
-            VALUES (?, ?, ?, ?, ?)""",
-            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), from_id, to_id, amount, user))
-        conn.commit()
-
-def apply_payment(from_id, to_id, amount):
-    with connect() as conn:
+            VALUES (?, ?, ?, ?, ?)""", (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), from_id, to_id, amount, user))
         conn.execute("UPDATE players SET balance = balance + ? WHERE id=?", (amount, from_id))
         conn.execute("UPDATE players SET balance = balance - ? WHERE id=?", (amount, to_id))
         conn.commit()
+
