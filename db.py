@@ -56,7 +56,7 @@ def init_db():
     ''')
 
 
-    rows = c.execute("SELECT * FROM players").fetchall()
+    rows = c.execute("SELECT id, name, balance FROM players").fetchall()
     print("\n=== Список игроков ===")
     for r in rows:
         print(r)
