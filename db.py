@@ -1,8 +1,10 @@
 import sqlite3
 from config import DB_NAME, PLAYERS
 
+
 def connect():
     return sqlite3.connect(DB_NAME)
+
 
 def init_db():
     conn = connect()
@@ -30,7 +32,8 @@ def init_db():
 
     # Добавить игроков из конфига
     for player in PLAYERS:
-        c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (player,))
+        c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)",
+                  (player, ))
 
     # Таблица активности (игра)
     c.execute('''
@@ -55,13 +58,11 @@ def init_db():
         user TEXT)
     ''')
 
-
     rows = c.execute("SELECT id, name, balance FROM players").fetchall()
     print("\n=== Список игроков ===")
     for r in rows:
         print(r)
     print("=======================\n")
 
-    
     conn.commit()
     conn.close()

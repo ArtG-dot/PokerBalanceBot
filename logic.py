@@ -1,4 +1,3 @@
-from os import error
 from config import BUYIN_VALUE, CHIPS_PER_BUYIN, CHIPS_PER_CURRENCY
 from datetime import datetime
 from db import connect
@@ -11,56 +10,50 @@ def create_player(name):
 
 def get_player(player_id):
     with connect() as conn:
-        rows = conn.execute("SELECT id, name, spent, earned, balance, is_playing FROM players WHERE id=?", (player_id,)).fetchone()
-    if not rows: 
+        row = conn.execute("SELECT id, name, spent, earned, balance, is_playing FROM players WHERE id=?", (player_id,)).fetchone()
+    if not row: 
         return None
     return {
-        "id": rows[0],
-        "name": rows[1],
-        "spent": rows[2],
-        "earned": rows[3],
-        "balance": rows[4],
-        "is_playing": rows[5]}
+        "id": row[0],
+        "name": row[1],
+        "spent": row[2],
+        "earned": row[3],
+        "balance": row[4],
+        "is_playing": row[5]}
 
 def get_all_players():
     with connect() as conn:
         rows = conn.execute("SELECT id, name, spent, earned, balance, is_playing FROM players WHERE id != 99999 ORDER BY id").fetchall()
-    if not rows: 
-        return None
     players = []
-    for r in rows:
+    for row in rows:
         players.append({
-            "id": r[0],
-            "name": r[1],
-            "spent": r[2],
-            "earned": r[3],
-            "balance": r[4],
-            "is_playing": rows[5]})
+            "id": row[0],
+            "name": row[1],
+            "spent": row[2],
+            "earned": row[3],
+            "balance": row[4],
+            "is_playing": row[5]})
     return players
 
 def get_active_players():
     with connect() as conn:
         rows = conn.execute("SELECT id, name FROM players WHERE is_playing=1 ORDER BY id").fetchall()
-    if not rows: 
-        return None
     players = []
-    for r in rows:
+    for row in rows:
         players.append({
-            "id": r[0],
-            "name": r[1]})
+            "id": row[0],
+            "name": row[1]})
     return players
 
 def get_potential_players():
     with connect() as conn: #sorting by count of games
         rows = conn.execute("""SELECT p.id, p.name FROM players p LEFT JOIN activities a ON p.id = a.player_id
             WHERE p.is_playing=0 AND p.id != 99999 GROUP BY p.id, p.name ORDER BY COUNT(a.id) DESC, p.id""").fetchall()
-    if not rows: 
-        return None
     players = []
-    for r in rows:
+    for row in rows:
         players.append({
-            "id": r[0],
-            "name": r[1]})
+            "id": row[0],
+            "name": row[1]})
     return players
         
 
@@ -76,7 +69,7 @@ def get_active_game():
 
 def get_last_game():
     with connect() as conn:
-        row = conn.execute("SELECT id FROM games ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute("SELECT id FROM games ORDER BY start_time DESC LIMIT 1").fetchone()
         return row[0] if row else None
 
 def get_game_date(game_id):
@@ -112,17 +105,17 @@ def get_players_stat(year=None):
         if year:
             query += " AND strftime('%Y', g.start_time)=?"
             params.append(str(year))
-        query += " GROUP BY p.id, p.name ORDER BY balance DESC, p.id"
+        query += " GROUP BY p.id, p.name HAVING COUNT(DISTINCT g.id)>4 ORDER BY balance DESC, p.id"
         rows = conn.execute(query, params).fetchall()
     stats = []
-    for r in rows:
+    for row in rows:
         stats.append({
-            "id": r[0],
-            "name": r[1],
-            "spent": r[2],
-            "earned": r[3],
-            "balance": r[4],
-            "games_count": r[5]
+            "id": row[0],
+            "name": row[1],
+            "spent": row[2],
+            "earned": row[3],
+            "balance": row[4],
+            "games_count": row[5]
         })
     return stats
 
@@ -140,16 +133,16 @@ def get_game_stat(game_id):
             GROUP BY p.id, p.name, p.is_playing
             ORDER BY (money_out - money_in) DESC""",(CHIPS_PER_BUYIN, BUYIN_VALUE, CHIPS_PER_CURRENCY, game_id)).fetchall()
         stats = []
-        for r in rows:
+        for row in rows:
             stats.append({
-                "id": r[0],
-                "name": r[1],
-                "is_playing": r[2],
-                "buyins": r[3],
-                "chips_in": r[4],
-                "chips_out": r[5],
-                "money_in": r[6],
-                "money_out": r[7]
+                "id": row[0],
+                "name": row[1],
+                "is_playing": row[2],
+                "buyins": row[3],
+                "chips_in": row[4],
+                "chips_out": row[5],
+                "money_in": row[6],
+                "money_out": row[7]
             })
         return stats
 
@@ -246,4 +239,3 @@ def execute_payment(from_id, to_id, amount, user="system"):
         conn.execute("UPDATE players SET balance = balance + ? WHERE id=?", (amount, from_id))
         conn.execute("UPDATE players SET balance = balance - ? WHERE id=?", (amount, to_id))
         conn.commit()
-
